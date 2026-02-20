@@ -2,14 +2,16 @@
 EvalKit CLI entry point.
 
 Commands:
-  evalkit profile   — profile a single inference run
-  evalkit benchmark — run N iterations and show aggregate stats
+  evalkit profile        — profile a single ollama inference run
+  evalkit benchmark      — run N iterations on ollama and show aggregate stats
+  evalkit profile-llama  — profile a single llama.cpp inference run
 """
 
 import typer
 from rich.console import Console
 
 from evalkit.backends.ollama import OllamaBackend
+from evalkit.backends.llamacpp import LlamaCppBackend
 from evalkit.core.metrics import BenchmarkResult
 from evalkit.core.hardware import detect_hardware
 from evalkit.core.recommendations import RecommendationEngine
@@ -86,4 +88,52 @@ def benchmark(
     warm_results = [r for r in results if r.load_duration < 1.0]
     analysis_result = warm_results[-1] if warm_results else results[-1]
     recs = RecommendationEngine().analyze(analysis_result, hardware)
+    show_recommendations(recs)
+
+
+@app.command(name="profile-llama")
+def profile_llama(
+    model: str = typer.Option(..., "--model", "-m", help="Path to a .gguf model file"),
+    prompt: str = typer.Option(..., "--prompt", "-p", help="The prompt to run"),
+    ctx_size: int = typer.Option(4096, "--ctx-size", "-c", help="KV cache context window in tokens"),
+    threads: int = typer.Option(None, "--threads", "-t", help="CPU threads (default: half logical cores)"),
+    n_gpu_layers: int = typer.Option(None, "--n-gpu-layers", "-ngl", help="GPU layers to offload (0 = CPU only)"),
+):
+    """
+    Profile a single llama.cpp inference run using the llama-completion binary.
+
+    Model must be a path to a .gguf file. You can use ollama's cached blobs directly:
+    ~/.ollama/models/blobs/sha256-<hash>
+    """
+    try:
+        backend = LlamaCppBackend(
+            context_size=ctx_size,
+            threads=threads,
+            n_gpu_layers=n_gpu_layers,
+        )
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+
+    if not backend.is_available():
+        console.print("[red]llama-completion binary not found or not executable.[/red]")
+        console.print("[dim]Install with: brew install llama.cpp[/dim]")
+        raise typer.Exit(code=1)
+
+    hardware = detect_hardware()
+    console.print(f"\n[dim]Running llama.cpp inference on [bold]{model}[/bold]...[/dim]")
+    console.print(f"[dim]Hardware: {hardware.summary()}[/dim]")
+
+    try:
+        result = backend.run(model_path=model, prompt=prompt)
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+
+    show_result(result)
+
+    recs = RecommendationEngine().analyze(result, hardware)
     show_recommendations(recs)
